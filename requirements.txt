@@ -1,0 +1,39 @@
+# Pattern 5: EVI + Claude + BeeAI Integration
+# Requirements for xpressive-useragent-beeai
+
+# Core dependencies
+# ================
+
+# Hume EVI (Empathic Voice Interface)
+hume[microphone]>=0.6.0
+
+# BeeAI Framework (multi-agent system)
+beeai-framework>=0.1.0
+
+# Claude Agent SDK (orchestration and routing)
+anthropic>=0.39.0
+
+# Environment configuration
+python-dotenv>=1.0.0
+
+# Quick tools dependencies
+requests>=2.31.0
+pytz>=2023.3
+
+# Audio dependencies (included with hume[microphone])
+# sounddevice
+# pyaudio
+# portaudio (system dependency: brew install portaudio on macOS)
+
+# Optional: For specific use cases
+# =================================
+
+# OpenWeather API (for weather tool)
+# Get API key at: https://openweathermap.org/api
+# Set OPENWEATHER_API_KEY in .env
+
+# Development dependencies (optional)
+# ====================================
+# ipython>=8.0.0  # Better REPL for testing
+# pytest>=7.0.0   # Testing framework
+# black>=23.0.0   # Code formatting
