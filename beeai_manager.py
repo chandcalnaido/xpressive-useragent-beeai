@@ -10,7 +10,11 @@ import time
 from typing import Dict, Any, Optional
 from beeai_framework.agents.requirement import RequirementAgent
 from beeai_framework.backend import ChatModel
-from beeai_framework.tools import ThinkTool, WikipediaTool, OpenMeteoTool, HandoffTool
+from beeai_framework.tools.think import ThinkTool
+from beeai_framework.tools.search.wikipedia import WikipediaTool
+from beeai_framework.tools.weather import OpenMeteoTool
+from beeai_framework.tools.handoff import HandoffTool
+from beeai_framework.logger import Logger
 
 
 class BeeAIManager:
@@ -32,8 +36,15 @@ class BeeAIManager:
         """
         self.verbose = verbose
         self.model_name = model_name
+
+        # Python logger for Pattern 5 integration
         self.logger = logging.getLogger('pattern5.beeai')
         self.logger.info(f"Initializing BeeAI Manager (model={model_name}, verbose={verbose})")
+
+        # BeeAI Logger for agent-specific logging
+        log_level = "TRACE" if verbose else "INFO"
+        self.beeai_logger = Logger("beeai_manager", level=log_level)
+        self.beeai_logger.info("BeeAI Logger initialized for agent operations")
 
         # Initialize LLM backend
         try:
@@ -147,6 +158,33 @@ class BeeAIManager:
 
         self.logger.debug("BeeAI agents initialized successfully")
 
+    def _log_agent_event(self, data, event):
+        """
+        Log agent execution events from BeeAI framework.
+
+        Args:
+            data: Event data from agent execution
+            event: Event object with path and creator information
+        """
+        creator_name = type(event.creator).__name__ if hasattr(event, 'creator') else "Unknown"
+        event_path = event.path if hasattr(event, 'path') else "unknown"
+
+        # Log to both loggers
+        self.beeai_logger.trace(f"Agent event: {event_path} by {creator_name}")
+
+        # Provide detailed logging for specific events
+        if self.verbose:
+            self.logger.debug(f"BeeAI Event [{event_path}] triggered by {creator_name}")
+
+            # Log tool usage
+            if "tool" in event_path.lower():
+                self.beeai_logger.debug(f"Tool execution event: {event_path}")
+
+            # Log agent handoffs
+            if "handoff" in event_path.lower():
+                self.beeai_logger.info(f"Agent handoff: {event_path}")
+                self.logger.info(f"BeeAI agent handoff detected: {event_path}")
+
     async def process_complex_query(self, query: str, context: Optional[str] = None) -> str:
         """
         Process a complex query through the BeeAI agent system.
@@ -174,9 +212,17 @@ class BeeAIManager:
             if context:
                 full_query = f"{query}\n\nAdditional context: {context}"
 
-            # Run the coordinator agent
+            # Run the coordinator agent with event observation
             self.logger.debug("Starting BeeAI coordinator agent")
-            result = await self.coordinator.run(full_query)
+            self.beeai_logger.debug("Executing coordinator agent run")
+
+            # Track agent execution steps with event observation
+            result = await self.coordinator.run(full_query).observe(
+                lambda emitter: emitter.on(
+                    "update",
+                    lambda data, event: self._log_agent_event(data, event)
+                )
+            )
 
             # Extract the response text
             if hasattr(result, 'content'):
@@ -191,6 +237,7 @@ class BeeAIManager:
             elapsed = time.time() - start_time
             print(f"\n⏱️  BeeAI processing completed in {elapsed:.2f}s\n")
             self.logger.info(f"BeeAI processing completed in {elapsed:.2f}s")
+            self.beeai_logger.info(f"Query processing completed in {elapsed:.2f}s")
 
             return response_text
 
