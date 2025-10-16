@@ -17,6 +17,9 @@ from hume import MicrophoneInterface, Stream
 from hume.empathic_voice.chat.socket_client import ChatConnectOptions
 from hume.empathic_voice import SubscribeEvent
 from hume.empathic_voice.types import AssistantInput
+from hume.tts import PostedUtterance, PostedUtteranceVoiceWithId
+import sounddevice as sd
+import numpy as np
 
 # Claude Agent SDK
 try:
@@ -104,6 +107,7 @@ class Pattern5EVIInterface:
         # API Keys
         self.hume_api_key = os.getenv("HUME_API_KEY")
         self.hume_config_id = os.getenv("HUME_CONFIG_ID")
+        self.hume_voice_id = os.getenv("HUME_VOICE_ID", "661ab31e-c4d6-4a16-952a-b5806a9b4ad1")  # Default to retrieved voice
         self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 
         if not self.hume_api_key:
@@ -258,20 +262,30 @@ class Pattern5EVIInterface:
 
         try:
             # Call Claude with tool use capability
-            response = await self._call_claude_with_tools(user_text)
+            # Returns tuple: (response_text, used_beeai_tools)
+            response, used_beeai = await self._call_claude_with_tools(user_text)
 
             elapsed = time.time() - start_time
             orchestration_logger.info(f"Claude SDK processing completed in {elapsed:.2f}s")
 
-            # Send response back through EVI
+            # Route response based on tool usage
             if response:
-                await self._send_to_evi(response)
+                if used_beeai:
+                    # Use TTS for BeeAI responses to avoid autonomous EVI responses
+                    orchestration_logger.info("Routing to TTS (BeeAI tools used)")
+                    print("   🎵 Using TTS for consistent voice delivery...")
+                    await self._send_via_tts(response)
+                else:
+                    # Use EVI for simple responses
+                    orchestration_logger.info("Routing to EVI (simple query)")
+                    await self._send_to_evi(response)
 
                 # Track metrics
                 self.metrics['conversation_turns'].append({
                     'query': user_text,
                     'response': response[:100] + "..." if len(response) > 100 else response,
-                    'time': elapsed
+                    'time': elapsed,
+                    'used_beeai': used_beeai
                 })
 
         except Exception as e:
@@ -281,7 +295,7 @@ class Pattern5EVIInterface:
             error_response = "I encountered an issue processing your request. Could you try rephrasing that?"
             await self._send_to_evi(error_response)
 
-    async def _call_claude_with_tools(self, user_message: str) -> str:
+    async def _call_claude_with_tools(self, user_message: str):
         """
         Call Claude API with tool use capability.
 
@@ -290,16 +304,23 @@ class Pattern5EVIInterface:
         2. If Claude wants to use a tool, execute it
         3. Send tool result back to Claude
         4. Repeat until Claude provides final response
+
+        Returns:
+            tuple: (response_text, used_beeai_tools)
         """
         orchestration_logger = self.loggers['orchestration']
 
         if not self.claude_client:
             # Fallback: no tool use, just return a simple response
             orchestration_logger.warning("Claude SDK not available, using fallback")
-            return "Claude SDK is not configured. Please install the anthropic package."
+            return ("Claude SDK is not configured. Please install the anthropic package.", False)
 
         # Get tool definitions
         tools = self.tool_registry.get_tool_definitions()
+
+        # Track if BeeAI tools were used
+        beeai_tools = {"consult_research_team", "analyze_topic", "compare_items"}
+        used_beeai = False
 
         # System prompt for voice assistant behavior with BeeAI context
         system_prompt = """You are an intelligent voice assistant with access to various tools.
@@ -381,13 +402,18 @@ when needed."""
                     print(f"   🔧 Using tool: {tool_name}")
                     orchestration_logger.info(f"Tool requested: {tool_name} with input: {tool_input}")
 
+                    # Track if BeeAI tools are used
+                    if tool_name in beeai_tools:
+                        used_beeai = True
+                        orchestration_logger.info(f"BeeAI tool detected: {tool_name}")
+
                     # Track metrics
                     if tool_name not in self.metrics['tool_calls']:
                         self.metrics['tool_calls'][tool_name] = 0
                     self.metrics['tool_calls'][tool_name] += 1
 
                     # Send immediate acknowledgment for long-running operations
-                    if tool_name in ["consult_research_team", "analyze_topic", "compare_items"]:
+                    if tool_name in beeai_tools:
                         ack_message = "Let me analyze that for you. This will take a moment."
                         await self._send_to_evi(ack_message)
                         orchestration_logger.info("Sent acknowledgment for BeeAI operation")
@@ -425,6 +451,7 @@ when needed."""
                     final_response += block.text
 
             orchestration_logger.info(f"Final response generated: {final_response[:100]}...")
+            orchestration_logger.info(f"BeeAI tools used: {used_beeai}")
 
             # Add to conversation history
             self.conversation_history.append({
@@ -432,18 +459,58 @@ when needed."""
                 "content": final_response
             })
 
-            return final_response
+            return (final_response, used_beeai)
 
         # Max iterations reached
         orchestration_logger.warning(f"Max iterations ({max_iterations}) reached in agentic loop")
-        return "I've processed your request, but it took longer than expected. Could you try asking in a different way?"
+        return ("I've processed your request, but it took longer than expected. Could you try asking in a different way?", used_beeai)
 
     async def _send_to_evi(self, text: str):
-        """Send text to EVI to be spoken"""
+        """Send text to EVI to be spoken (may trigger autonomous responses)"""
         if self.socket and text:
             self.logger.debug(f"Sending to EVI for playback: {text[:100]}...")
             await self.socket.send_assistant_input(AssistantInput(text=text))
             self.logger.info("Assistant input sent to EVI for speech synthesis")
+
+    async def _send_via_tts(self, text: str):
+        """
+        Send text via Hume TTS directly (bypasses EVI conversational layer).
+        Prevents autonomous EVI responses during complex BeeAI outputs.
+        """
+        if not text:
+            return
+
+        self.logger.debug(f"Sending to Hume TTS: {text[:100]}...")
+
+        try:
+            # Create TTS utterance with the same voice as EVI config
+            utterance = PostedUtterance(
+                text=text,
+                voice=PostedUtteranceVoiceWithId(id=self.hume_voice_id)
+            )
+
+            self.logger.debug(f"Using voice ID: {self.hume_voice_id}")
+
+            # Stream audio from TTS API
+            async for chunk in self.hume_client.tts.synthesize_json_streaming(
+                utterances=[utterance],
+                strip_headers=True
+            ):
+                # Route audio to the same playback stream EVI uses
+                if self.stream and hasattr(chunk, 'data'):
+                    audio_bytes = base64.b64decode(chunk.data)
+                    await self.stream.queue.put(audio_bytes)
+                    self.logger.debug(
+                        f"TTS audio chunk: {len(audio_bytes)} bytes"
+                    )
+
+            self.logger.info("TTS speech synthesis completed")
+
+        except Exception as e:
+            self.logger.error(f"TTS synthesis error: {e}", exc_info=True)
+            # Fallback to EVI if TTS fails
+            self.logger.warning("Falling back to EVI for speech synthesis")
+            await self._send_to_evi(text)
 
     def _print_metrics(self):
         """Print session metrics"""
