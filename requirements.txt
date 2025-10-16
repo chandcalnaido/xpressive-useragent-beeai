@@ -21,7 +21,8 @@ requests>=2.31.0
 pytz>=2023.3
 
 # Audio dependencies (included with hume[microphone])
-# sounddevice
+sounddevice>=0.4.6  # For TTS audio playback
+numpy>=1.24.0  # For audio processing
 # pyaudio
 # portaudio (system dependency: brew install portaudio on macOS)
 
